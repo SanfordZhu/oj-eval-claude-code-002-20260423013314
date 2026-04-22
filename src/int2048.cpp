@@ -389,7 +389,8 @@ int2048 &int2048::operator%=(const int2048 &b) {
   std::vector<int> q, r;
   div_mod_abs(A.d, B.d, q, r);
   if (!r.empty() && (A.neg != B.neg)) {
-    r = add_abs(r, B.d);
+    // r = |B| - r
+    r = sub_abs(B.d, r);
   }
   A.d.swap(r);
   A.neg = (!A.d.empty() ? B.neg : false);
