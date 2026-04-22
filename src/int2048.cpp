@@ -269,71 +269,91 @@ int2048 &int2048::operator*=(const int2048 &b) {
 
 int2048 operator*(int2048 a, const int2048 &b) { return a *= b; }
 
-// Division and modulo: floor division with Python semantics
-static void div_mod_abs(const std::vector<int> &a, const std::vector<int> &b, std::vector<int> &q, std::vector<int> &r) {
+// Division and modulo (absolute) via base-digit long division with binary search
+static int cmp_abs_be(const std::vector<int> &A, const std::vector<int> &B) {
+  if (A.size() != B.size()) return A.size() < B.size() ? -1 : 1;
+  for (size_t i=0;i<A.size();++i) {
+    if (A[i] != B[i]) return A[i] < B[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+static std::vector<int> mul_abs_be_digit(const std::vector<int> &B, int k) {
   const int base = BigIntCore::base;
-  r.clear(); q.clear();
-  if (b.empty()) return; // undefined; tests guarantee not 0
-  if (cmp_abs(a,b) < 0) { r = a; return; }
-  int n = (int)a.size(), m = (int)b.size();
-  q.assign(n - m + 1, 0);
-  // Normalized long division
-  int norm = base / (b.back() + 1);
-  std::vector<int> A(a), B(b);
-  // multiply by norm
+  std::vector<int> R(B.size());
   long long carry = 0;
-  for (int i=0;i<n;++i) { long long cur = (long long)A[i]*norm + carry; A[i] = (int)(cur % base); carry = cur / base; }
-  if (carry) A.push_back((int)carry), ++n;
-  carry = 0;
-  for (int i=0;i<m;++i) { long long cur = (long long)B[i]*norm + carry; B[i] = (int)(cur % base); carry = cur / base; }
-  if (carry) B.push_back((int)carry), ++m;
+  for (int i=(int)B.size()-1; i>=0; --i) {
+    long long cur = (long long)B[i]*k + carry;
+    R[i] = (int)(cur % base);
+    carry = cur / base;
+  }
+  if (carry) {
+    R.insert(R.begin(), (int)carry);
+  }
+  // trim leading zeros be
+  size_t p=0; while (p<R.size() && R[p]==0) ++p; if (p) R.erase(R.begin(), R.begin()+p);
+  return R;
+}
+
+static std::vector<int> sub_abs_be(const std::vector<int> &A, const std::vector<int> &B) {
+  // assume A >= B in big-endian base
+  const int base = BigIntCore::base;
+  int n = (int)std::max(A.size(), B.size());
   std::vector<int> R(n,0);
-  for (int i=0;i<n;++i) R[i] = A[i];
-  std::vector<int> Bb = B;
-  // shift-based division
-  for (int i = n - 1; i >= m - 1; --i) {
-    long long r2 = (long long)R[i];
-    long long r1 = (i-1>=0)? (long long)R[i-1] : 0;
-    long long r0 = (i-2>=0)? (long long)R[i-2] : 0; // help estimation stability
-    long long est = (r2*base + r1) / B.back();
-    if (est >= base) est = base-1;
-    // subtract est * B shifted by (i - m + 1)
-    int k = i - (m - 1);
-    long long borrow = 0;
-    for (int j=0; j<m || borrow; ++j) {
-      long long cur = (long long)R[j+k] - (long long)(j<m ? B[j] : 0) * est - borrow;
-      if (cur < 0) { long long db = (-cur + base - 1)/base; cur += db * base; borrow = db; } else borrow = 0;
-      R[j+k] = (int)cur;
-    }
-    // fix if negative by adding back B and decrementing est
-    // check if leading segment became negative by comparing top digits
-    while (true) {
-      // If R segment >= 0 we are fine; ensure no over-borrow propagated beyond k+m-1
-      bool negSeg = false;
-      for (int t=i; t>=i-2 && t>=0; --t) if (R[t]<0) { negSeg=true; break; }
-      if (!negSeg) break;
-      // add back B shifted
-      long long carry2 = 0;
-      for (int j=0; j<m || carry2; ++j) {
-        long long cur = (long long)R[j+k] + (long long)(j<m ? B[j] : 0) + carry2;
-        R[j+k] = (int)(cur % base);
-        carry2 = cur / base;
-      }
-      --est;
-    }
-    q[k] = (int)est;
+  // align to same length
+  int ia = (int)A.size()-1, ib = (int)B.size()-1, ir = n-1;
+  long long borrow = 0;
+  for (; ir>=0; --ir) {
+    long long av = (ia>=0 ? A[ia] : 0);
+    long long bv = (ib>=0 ? B[ib] : 0);
+    long long cur = av - bv - borrow;
+    if (cur < 0) { cur += base; borrow = 1; } else borrow = 0;
+    R[ir] = (int)cur;
+    --ia; --ib;
   }
-  // unnormalize remainder
-  // R has length n; the remainder is first m-1 digits
-  r.assign(R.begin(), R.begin() + (m-1));
-  // divide by norm
-  long long carry3 = 0;
-  for (int i=(int)r.size()-1; i>=0; --i) {
-    long long cur = r[i] + carry3 * base;
-    r[i] = (int)(cur / norm);
-    carry3 = cur % norm;
+  // trim leading zeros
+  size_t p=0; while (p<R.size() && R[p]==0) ++p; if (p) R.erase(R.begin(), R.begin()+p);
+  return R;
+}
+
+static void div_mod_abs(const std::vector<int> &a_le, const std::vector<int> &b_le, std::vector<int> &q_le, std::vector<int> &r_le) {
+  q_le.clear(); r_le.clear();
+  if (b_le.empty()) return;
+  if (cmp_abs(a_le, b_le) < 0) { r_le = a_le; return; }
+  // convert to big-endian
+  std::vector<int> A, B;
+  A.assign(a_le.rbegin(), a_le.rend());
+  B.assign(b_le.rbegin(), b_le.rend());
+  std::vector<int> R; // remainder in big-endian
+  std::vector<int> Q; Q.reserve(A.size());
+  const int base = BigIntCore::base;
+  for (size_t idx=0; idx<A.size(); ++idx) {
+    // R = R * base + A[idx]
+    if (!R.empty() || A[idx]!=0) {
+      R.push_back(A[idx]);
+    }
+    if (R.empty()) { Q.push_back(0); continue; }
+    // binary search qdigit in [0, base-1]
+    int lo = 0, hi = base - 1, best = 0;
+    while (lo <= hi) {
+      int mid = (lo + hi) >> 1;
+      std::vector<int> M = mul_abs_be_digit(B, mid);
+      int cmp = cmp_abs_be(M, R);
+      if (cmp <= 0) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
+    }
+    if (best) {
+      std::vector<int> M = mul_abs_be_digit(B, best);
+      R = sub_abs_be(R, M);
+    }
+    // trim leading zeros in R
+    size_t p=0; while (p<R.size() && R[p]==0) ++p; if (p) R.erase(R.begin(), R.begin()+p);
+    Q.push_back(best);
   }
-  trim(q); trim(r);
+  // trim leading zeros in Q
+  size_t p=0; while (p<Q.size() && Q[p]==0) ++p; if (p) Q.erase(Q.begin(), Q.begin()+p);
+  // convert back to little-endian
+  q_le.assign(Q.rbegin(), Q.rend()); trim(q_le);
+  r_le.assign(R.rbegin(), R.rend()); trim(r_le);
 }
 
 int2048 &int2048::operator/=(const int2048 &b) {
@@ -342,23 +362,17 @@ int2048 &int2048::operator/=(const int2048 &b) {
   if (B.d.empty()) return *this; // undefined
   if (A.d.empty()) { A.neg=false; return *this; }
   std::vector<int> q, r;
-  // compute abs division
   div_mod_abs(A.d, B.d, q, r);
   bool negQ = (A.neg != B.neg);
-  // Python floor division adjustment: if negQ and r != 0, decrement q by 1 and adjust r
-  if (!r.empty()) {
-    if (A.neg != B.neg) {
-      // q = q - 1; r = r + |B|
-      // decrement q
-      const int base = BigIntCore::base;
-      int i=0; while (i<(int)q.size()) {
-        if (q[i]>0) { --q[i]; break; }
-        q[i] = base-1; ++i;
-      }
-      trim(q);
-      // r = r + |B|
-      r = add_abs(r, B.d);
+  if (!r.empty() && negQ) {
+    // qabs++
+    const int base = BigIntCore::base;
+    int carry = 1;
+    for (size_t i=0; i<q.size() && carry; ++i) {
+      int cur = q[i] + carry;
+      if (cur >= base) { q[i] = cur - base; carry = 1; } else { q[i] = cur; carry = 0; }
     }
+    if (carry) q.push_back(carry);
   }
   A.d.swap(q);
   A.neg = (!A.d.empty() ? negQ : false);
@@ -374,14 +388,10 @@ int2048 &int2048::operator%=(const int2048 &b) {
   if (A.d.empty()) { A.neg=false; return *this; }
   std::vector<int> q, r;
   div_mod_abs(A.d, B.d, q, r);
-  bool negQ = (A.neg != B.neg);
-  if (!r.empty()) {
-    if (A.neg != B.neg) {
-      r = add_abs(r, B.d);
-    }
+  if (!r.empty() && (A.neg != B.neg)) {
+    r = add_abs(r, B.d);
   }
   A.d.swap(r);
-  // modulo sign follows divisor
   A.neg = (!A.d.empty() ? B.neg : false);
   return *this;
 }
